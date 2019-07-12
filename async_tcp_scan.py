@@ -2,8 +2,12 @@ import asyncio
 import ipaddress
 import re
 import sys
+from typing import Generator, NamedTuple, Tuple, Any
 
-MAX_NUMBER_WORKERS = 200
+# pip dependencies
+from aiostream.stream import merge
+
+MAX_CONCURRENCY = 200
 
 
 class PortScanTask(NamedTuple):
@@ -13,8 +17,8 @@ class PortScanTask(NamedTuple):
 
 
 def ip_sort(t: PortScanTask):
-    """used to sort output by IP address, then port"""
-    return tuple([*map(int, t[0].split('.')), t[1]])
+    """used to sort output by ipaddress, then port"""
+    return tuple([*map(int, t.ip.split('.')), t.port])
 
 
 def eprint(*args, **kwargs):
@@ -57,24 +61,25 @@ def fancy_print(data, csv):
         print(fmt.format(*datum))
 
 
-async def task_worker(task_queue, out_queue):
+async def task_worker(task_generator: Generator[PortScanTask, Any, None]):
     """pull connection information from queue and attempt connection"""
     while True:
-        ip, port, timeout = (await task_queue.get())
-        conn = asyncio.open_connection(ip, port)
         try:
-            await asyncio.wait_for(conn, timeout)
-        except asyncio.TimeoutError:
+            task: PortScanTask = next(task_generator)
+        except StopIteration:
+            # Generator is exhausted. Stop scanning
+            return
+
+        conn = asyncio.open_connection(task.ip, task.port)
+        try:
+            await asyncio.wait_for(conn, task.timeout)
+        except (asyncio.TimeoutError, ConnectionRefusedError):
             pass
         else:
-            out_queue.put_nowait((ip, port))
-        finally:
-            task_queue.task_done()
+            yield task  # yield successful tasks
 
 
-async def task_master(
-        network: str, portrange: str, timeout: float,
-        task_queue: asyncio.Queue, scan_completed: asyncio.Event):
+def task_generator(network: str, port_range: Tuple[int], timeout: float):
     """add jobs to a queue, up to ``MAX_NUMBER_WORKERS'' at a time"""
     network = network.replace('/32', '')
     try:
@@ -84,9 +89,9 @@ async def task_master(
         # ...or a CIDR subnet.
         hosts = map(str, ipaddress.ip_network(network).hosts())
     for ip in hosts:
-        for port in portrange:
-            await task_queue.put((ip, port, timeout))
-    scan_completed.set()
+        eprint(ip)
+        for port in port_range:
+            yield PortScanTask(ip, port, timeout)
 
 
 async def scanner(network, ports=None, timeout=0.1, csv=False):
@@ -95,12 +100,10 @@ async def scanner(network, ports=None, timeout=0.1, csv=False):
         if scanning over the internet, you might want to set the timeout
         to around 1 second, depending on internet speed.
     """
-    task_queue = asyncio.Queue(maxsize=MAX_NUMBER_WORKERS)
-    out_queue = asyncio.Queue()
     scan_completed = asyncio.Event()
     scan_completed.clear()  # progress the main loop
 
-    if ports is None:  # list of common ports
+    if ports is None:  # list of common-ass ports
         ports = ("9,20-23,25,37,41,42,53,67-70,79-82,88,101,102,107,109-111,"
                  "113,115,117-119,123,135,137-139,143,152,153,156,158,161,162,170,179,"
                  "194,201,209,213,218,220,259,264,311,318,323,383,366,369,371,384,387,"
@@ -112,24 +115,18 @@ async def scanner(network, ports=None, timeout=0.1, csv=False):
                  "12345,54321,2020,2121,2525,65535,666,1337,31337,8181,6969")
     ports = parse_ports(ports)
 
-    # initialize task to add scan info to task queue
-    tasks = [asyncio.create_task(
-        task_master(network, ports, timeout, task_queue, scan_completed)
-    )]
-    # initialize workers
-    for _ in range(MAX_NUMBER_WORKERS):
-        tasks.append(asyncio.create_task(task_worker(task_queue, out_queue)))
+    # initialize task generator
+    task_gen = task_generator(network, ports, timeout)
 
+    open_ports = list()
     eprint('scanning . . .')
-    await scan_completed.wait()  # wait until the task master coroutine is done
-    await task_queue.join()  # wait for workers to finish
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    workers = [task_worker(task_gen) for _ in range(MAX_CONCURRENCY)]
+    merged = merge(*workers)
+    async with merged.stream() as streamer:
+        async for task in streamer:
+            open_ports.append(task)
+
     eprint('gathering output . . .')
-    open_ports = []
-    while out_queue.qsize():
-        open_ports.append(out_queue.get_nowait())
     open_ports.sort(key=ip_sort)
     fancy_print(open_ports, csv=csv)
 
@@ -141,9 +138,9 @@ if __name__ == '__main__':
     if len(sys.argv) < 2:
         print(
             'TCP Network scanner using asyncio module for Python 3.7+',
-            "Scan ports in ``port_string'' or common ports if blank."
+            "Scan ports in ``portstring'' or common ports if blank."
             'Port string syntax: port, port-range ...',
-            f'Usage: {sys.argv[0]} network [port_string]',
+            f'Usage: {sys.argv[0]} network [portstring]',
             sep='\n'
         )
         raise SystemExit
