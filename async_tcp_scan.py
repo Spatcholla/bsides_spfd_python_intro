@@ -94,7 +94,7 @@ def task_generator(network: str, port_range: Tuple[int], timeout: float):
             yield PortScanTask(ip, port, timeout)
 
 
-async def scanner(network, ports=None, timeout=0.1, csv=False):
+async def scanner(network, ports=None, timeout=0.5, csv=False):
     """
         main task coroutine which manages all the other functions
         if scanning over the internet, you might want to set the timeout
