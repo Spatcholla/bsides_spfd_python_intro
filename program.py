@@ -25,7 +25,7 @@ def program_loop():
     """ User interface loop to access aspecct of the package."""
     while True:
         cmd = input("Would you like to perform a [s]can or e[x]it?\n:: ").lower()
-        if cmd is "s":
+        if cmd == "s":
             ip_addr = input(
                 "Enter the IP address or network CIDR you would like to scan: \n"
                 "Example of accepted inputs: 192.168.50.54 or 172.16.20.128/25\n"
